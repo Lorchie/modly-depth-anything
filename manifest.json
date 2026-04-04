@@ -1,0 +1,54 @@
+{
+  "id": "modly-depth-anything",
+  "name": "Depth Anything Toolkit",
+  "version": "1.1.0",
+  "author": "Guillaume",
+  "description": "A modular toolkit providing depth estimation, point cloud generation, and mesh reconstruction using Depth-Anything. Includes GPU acceleration when available.",
+  "generator_class": "DepthAnythingGenerator",
+  "nodes": [
+    {
+      "id": "image_to_depth",
+      "name": "Image → Depth Map",
+      "input": "image",
+      "output": "image",
+      "params_schema": [
+        {
+          "id": "model_type",
+          "label": "Model Variant",
+          "type": "select",
+          "default": "vitl",
+          "options": [
+            { "value": "vits", "label": "ViT-S (Fastest)" },
+            { "value": "vitb", "label": "ViT-B (Balanced)" },
+            { "value": "vitl", "label": "ViT-L (Best Quality)" }
+          ]
+        },
+        {
+          "id": "use_cuda",
+          "label": "Use GPU (CUDA)",
+          "type": "select",
+          "default": "auto",
+          "options": [
+            { "value": "auto", "label": "Auto-detect" },
+            { "value": "true", "label": "Force GPU" },
+            { "value": "false", "label": "Force CPU" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "depth_to_pointcloud",
+      "name": "Depth Map → Point Cloud",
+      "input": "image",
+      "output": "mesh",
+      "params_schema": []
+    },
+    {
+      "id": "pointcloud_to_mesh",
+      "name": "Point Cloud → Mesh",
+      "input": "mesh",
+      "output": "mesh",
+      "params_schema": []
+    }
+  ]
+}

@@ -69,12 +69,15 @@ class DepthAnythingGenerator(BaseGenerator):
         import torch
         import trimesh
 
-        model_type  = params.get("model_type", "vitl")
-        use_cuda    = params.get("use_cuda", "auto")
-        focal       = float(params.get("focal_length", 500.0))
-        depth_scale = float(params.get("depth_scale", 1.5))
-        max_faces   = int(params.get("max_faces", 100000))
-        smooth      = str(params.get("smooth_depth", "true")).lower() == "true"
+        model_type      = params.get("model_type", "vitl")
+        use_cuda        = params.get("use_cuda", "auto")
+        focal           = float(params.get("focal_length", 500.0))
+        depth_scale     = float(params.get("depth_scale", 1.5))
+        max_faces       = int(params.get("max_faces", 100000))
+        smooth          = str(params.get("smooth_depth", "true")).lower() == "true"
+        smooth_radius   = int(params.get("smooth_radius", 2))
+        auto_crop       = str(params.get("auto_crop", "true")).lower() == "true"
+        auto_brightness = str(params.get("auto_brightness", "true")).lower() == "true"
 
         # -- Step 1: load depth model --
         self._ensure_model(model_type, use_cuda)
@@ -83,6 +86,11 @@ class DepthAnythingGenerator(BaseGenerator):
         # -- Step 2: depth estimation --
         self._report(progress_cb, 5, "Loading image...")
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+
+        if auto_crop:
+            image = _autocrop_black_borders(image)
+        if auto_brightness:
+            image = _auto_brightness(image)
 
         self._report(progress_cb, 15, "Running depth estimation...")
         inputs = self._processor(images=image, return_tensors="pt").to(self._device)
@@ -105,7 +113,7 @@ class DepthAnythingGenerator(BaseGenerator):
         # -- Step 3: depth smoothing (reduces noise, smoother mesh) --
         if smooth:
             self._report(progress_cb, 40, "Smoothing depth map...")
-            depth_norm = _smooth_depth(depth_norm, radius=2)
+            depth_norm = _smooth_depth(depth_norm, radius=smooth_radius)
 
         # -- Step 4: build mesh with vertex colours --
         self._report(progress_cb, 55, "Building mesh...")
@@ -168,6 +176,60 @@ class DepthAnythingGenerator(BaseGenerator):
 # ------------------------------------------------------------------ #
 # Depth smoothing (pure numpy, no scipy required)
 # ------------------------------------------------------------------ #
+
+def _autocrop_black_borders(image: "Image.Image", threshold: int = 15) -> "Image.Image":
+    """
+    Detects and removes uniform black borders around the image.
+    Scans each side inward until a row/column whose mean exceeds threshold is found.
+    Returns the original image unchanged if no border is detected.
+    """
+    arr = np.array(image)                          # H x W x 3, uint8
+    gray = arr.mean(axis=2)                        # H x W
+
+    h, w = gray.shape
+    top, bottom, left, right = 0, h, 0, w
+
+    for i in range(h):
+        if gray[i, :].mean() > threshold:
+            top = i
+            break
+
+    for i in range(h - 1, -1, -1):
+        if gray[i, :].mean() > threshold:
+            bottom = i + 1
+            break
+
+    for j in range(w):
+        if gray[:, j].mean() > threshold:
+            left = j
+            break
+
+    for j in range(w - 1, -1, -1):
+        if gray[:, j].mean() > threshold:
+            right = j + 1
+            break
+
+    if top >= bottom or left >= right:
+        return image
+
+    return image.crop((left, top, right, bottom))
+
+
+def _auto_brightness(image: "Image.Image") -> "Image.Image":
+    """
+    Boosts brightness when the image is globally dark (mean pixel value below 80).
+    Uses a linear scale so that the mean is lifted to ~128.
+    Returns the original image unchanged if already bright enough.
+    """
+    from PIL import ImageEnhance
+    arr  = np.array(image, dtype=np.float32)
+    mean = arr.mean()
+    if mean >= 80.0:
+        return image
+    factor = 128.0 / max(mean, 1.0)
+    factor = float(np.clip(factor, 1.0, 4.0))
+    return ImageEnhance.Brightness(image).enhance(factor)
+
 
 def _smooth_depth(depth: np.ndarray, radius: int = 2) -> np.ndarray:
     """

@@ -71,6 +71,30 @@
           "tooltip": "Applies a box blur to the depth map before meshing. Reduces noise and jagged edges."
         },
         {
+          "id": "smooth_radius",
+          "label": "Smooth Radius",
+          "type": "int",
+          "default": 2,
+          "min": 1,
+          "max": 8,
+          "tooltip": "Blur radius for depth smoothing. Higher = smoother mesh but less detail. Only used when Smooth Depth is enabled.",
+          "show_if": { "smooth_depth": "true" }
+        },
+        {
+          "id": "auto_crop",
+          "label": "Auto-crop Black Borders",
+          "type": "boolean",
+          "default": true,
+          "tooltip": "Automatically detects and removes black borders around the image before depth estimation."
+        },
+        {
+          "id": "auto_brightness",
+          "label": "Auto Brightness",
+          "type": "boolean",
+          "default": true,
+          "tooltip": "Automatically boosts brightness for dark images (mean pixel below 80) before depth estimation."
+        },
+        {
           "id": "max_faces",
           "label": "Max Faces",
           "type": "int",

@@ -1,16 +1,19 @@
 {
   "id": "modly-depth-anything",
-  "name": "Depth Anything Toolkit",
-  "version": "1.1.0",
+  "name": "Depth Anything V2",
+  "version": "2.0.0",
   "author": "Guillaume",
-  "description": "A modular toolkit providing depth estimation, point cloud generation, and mesh reconstruction using Depth-Anything. Includes GPU acceleration when available.",
+  "description": "Depth estimation, point cloud generation, and mesh reconstruction using Depth Anything V2. Three chained nodes: image → depth map → point cloud → mesh. GPU acceleration when available.",
   "generator_class": "DepthAnythingGenerator",
+  "tags": ["depth-estimation", "point-cloud", "reconstruction", "image-to-mesh"],
   "nodes": [
     {
       "id": "image_to_depth",
       "name": "Image → Depth Map",
       "input": "image",
       "output": "image",
+      "hf_repo": "depth-anything/Depth-Anything-V2-Large-hf",
+      "download_check": "config.json",
       "params_schema": [
         {
           "id": "model_type",
@@ -18,21 +21,23 @@
           "type": "select",
           "default": "vitl",
           "options": [
-            { "value": "vits", "label": "ViT-S (Fastest)" },
-            { "value": "vitb", "label": "ViT-B (Balanced)" },
-            { "value": "vitl", "label": "ViT-L (Best Quality)" }
-          ]
+            { "value": "vits", "label": "ViT-S (Fastest, ~97 MB)" },
+            { "value": "vitb", "label": "ViT-B (Balanced, ~390 MB)" },
+            { "value": "vitl", "label": "ViT-L (Best Quality, ~1.3 GB)" }
+          ],
+          "tooltip": "Larger variants produce sharper depth maps at the cost of speed and VRAM."
         },
         {
           "id": "use_cuda",
-          "label": "Use GPU (CUDA)",
+          "label": "Device",
           "type": "select",
           "default": "auto",
           "options": [
-            { "value": "auto", "label": "Auto-detect" },
-            { "value": "true", "label": "Force GPU" },
+            { "value": "auto",  "label": "Auto-detect" },
+            { "value": "true",  "label": "Force GPU" },
             { "value": "false", "label": "Force CPU" }
-          ]
+          ],
+          "tooltip": "Select compute device. Auto-detect uses GPU when available."
         }
       ]
     },
@@ -41,14 +46,44 @@
       "name": "Depth Map → Point Cloud",
       "input": "image",
       "output": "mesh",
-      "params_schema": []
+      "params_schema": [
+        {
+          "id": "focal_length",
+          "label": "Focal Length (px)",
+          "type": "float",
+          "default": 500.0,
+          "min": 100.0,
+          "max": 2000.0,
+          "step": 10.0,
+          "tooltip": "Estimated focal length in pixels used for back-projection. Higher values compress depth range."
+        }
+      ]
     },
     {
       "id": "pointcloud_to_mesh",
       "name": "Point Cloud → Mesh",
       "input": "mesh",
       "output": "mesh",
-      "params_schema": []
+      "params_schema": [
+        {
+          "id": "poisson_depth",
+          "label": "Poisson Depth",
+          "type": "int",
+          "default": 8,
+          "min": 5,
+          "max": 12,
+          "tooltip": "Octree depth for Poisson surface reconstruction. Higher = more detail but slower and more memory."
+        },
+        {
+          "id": "max_faces",
+          "label": "Max Faces",
+          "type": "int",
+          "default": 50000,
+          "min": -1,
+          "max": 500000,
+          "tooltip": "Target face count after mesh simplification. Set to -1 to disable simplification."
+        }
+      ]
     }
   ]
 }

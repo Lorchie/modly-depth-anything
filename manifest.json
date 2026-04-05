@@ -3,13 +3,13 @@
   "name": "Depth Anything V2",
   "version": "2.0.0",
   "author": "Guillaume",
-  "description": "Depth estimation, point cloud generation, and mesh reconstruction using Depth Anything V2. Three chained nodes: image → depth map → point cloud → mesh. GPU acceleration when available.",
+  "description": "Depth estimation, point cloud generation, and mesh reconstruction using Depth Anything V2. Three chained nodes: image -> depth map -> point cloud -> mesh. GPU acceleration when available.",
   "generator_class": "DepthAnythingGenerator",
   "tags": ["depth-estimation", "point-cloud", "reconstruction", "image-to-mesh"],
   "nodes": [
     {
       "id": "image_to_depth",
-      "name": "Image → Depth Map",
+      "name": "Image -> Depth Map",
       "input": "image",
       "output": "image",
       "hf_repo": "depth-anything/Depth-Anything-V2-Large-hf",
@@ -43,9 +43,12 @@
     },
     {
       "id": "depth_to_pointcloud",
-      "name": "Depth Map → Point Cloud",
+      "name": "Depth Map -> Point Cloud",
       "input": "image",
       "output": "mesh",
+      "hf_repo": "depth-anything/Depth-Anything-V2-Large-hf",
+      "download_check": "config.json",
+      "hf_skip_prefixes": ["model.safetensors"],
       "params_schema": [
         {
           "id": "focal_length",
@@ -61,9 +64,12 @@
     },
     {
       "id": "pointcloud_to_mesh",
-      "name": "Point Cloud → Mesh",
+      "name": "Point Cloud -> Mesh",
       "input": "mesh",
       "output": "mesh",
+      "hf_repo": "depth-anything/Depth-Anything-V2-Large-hf",
+      "download_check": "config.json",
+      "hf_skip_prefixes": ["model.safetensors"],
       "params_schema": [
         {
           "id": "poisson_depth",

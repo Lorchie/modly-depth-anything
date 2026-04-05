@@ -6,9 +6,11 @@ GitHub    : https://github.com/DepthAnything/Depth-Anything-V2
 
 Pipeline:
   1. Depth estimation (transformers)
-  2. Depth smoothing (numpy box blur)
-  3. Back-projection -> textured 3D mesh (numpy + trimesh)
-  4. GLB export (trimesh)
+  2. Image pre-processing: auto-crop black borders, CLAHE brightness boost
+  3. Median filter pass  -- removes depth outlier spikes (leaves, noise)
+  4. Joint bilateral filter -- smooths depth guided by RGB edges (edge-preserving)
+  5. Back-projection -> textured 3D mesh (numpy + trimesh)
+  6. GLB export (trimesh) + optional depth map preview PNG
 """
 
 import io
@@ -69,21 +71,24 @@ class DepthAnythingGenerator(BaseGenerator):
         import torch
         import trimesh
 
-        model_type      = params.get("model_type", "vitl")
-        use_cuda        = params.get("use_cuda", "auto")
-        focal           = float(params.get("focal_length", 500.0))
-        depth_scale     = float(params.get("depth_scale", 1.5))
-        max_faces       = int(params.get("max_faces", 100000))
-        smooth          = str(params.get("smooth_depth", "true")).lower() == "true"
-        smooth_radius   = int(params.get("smooth_radius", 2))
-        auto_crop       = str(params.get("auto_crop", "true")).lower() == "true"
-        auto_brightness = str(params.get("auto_brightness", "true")).lower() == "true"
+        model_type         = params.get("model_type", "vitl")
+        use_cuda           = params.get("use_cuda", "auto")
+        focal              = float(params.get("focal_length", 470.0))
+        depth_scale        = float(params.get("depth_scale", 2.5))
+        max_faces          = int(params.get("max_faces", 300000))
+        smooth             = str(params.get("smooth_depth", "true")).lower() == "true"
+        smooth_radius      = int(params.get("smooth_radius", 4))
+        use_median         = str(params.get("median_filter", "true")).lower() == "true"
+        auto_crop          = str(params.get("auto_crop", "true")).lower() == "true"
+        auto_brightness    = str(params.get("auto_brightness", "true")).lower() == "true"
+        disc_thr           = float(params.get("discontinuity_threshold", 0.10))
+        save_depth_preview = str(params.get("save_depth_preview", "false")).lower() == "true"
 
         # -- Step 1: load depth model --
         self._ensure_model(model_type, use_cuda)
         self._check_cancelled(cancel_event)
 
-        # -- Step 2: depth estimation --
+        # -- Step 2: image pre-processing --
         self._report(progress_cb, 5, "Loading image...")
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
@@ -92,6 +97,7 @@ class DepthAnythingGenerator(BaseGenerator):
         if auto_brightness:
             image = _auto_brightness(image)
 
+        # -- Step 3: depth estimation --
         self._report(progress_cb, 15, "Running depth estimation...")
         inputs = self._processor(images=image, return_tensors="pt").to(self._device)
         with torch.no_grad():
@@ -110,20 +116,37 @@ class DepthAnythingGenerator(BaseGenerator):
 
         self._check_cancelled(cancel_event)
 
-        # -- Step 3: depth smoothing (reduces noise, smoother mesh) --
-        if smooth:
-            self._report(progress_cb, 40, "Smoothing depth map...")
-            depth_norm = _smooth_depth(depth_norm, radius=smooth_radius)
+        # -- Step 4: depth filtering (median + joint bilateral) --
+        if use_median or smooth:
+            self._report(progress_cb, 40, "Filtering depth map...")
+            depth_norm = _filter_depth(
+                depth_norm,
+                image,
+                sigma_space=smooth_radius,
+                use_median=use_median,
+                use_bilateral=smooth,
+            )
 
-        # -- Step 4: build mesh with vertex colours --
+        # -- Step 5: optional depth preview PNG --
+        self.outputs_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{int(time.time())}_{uuid.uuid4().hex[:8]}"
+
+        if save_depth_preview:
+            preview     = (depth_norm * 255).astype(np.uint8)
+            preview_img = Image.fromarray(preview, mode="L")
+            preview_path = self.outputs_dir / f"{stem}.depth.png"
+            preview_img.save(str(preview_path))
+            print(f"[DepthAnythingGenerator] Depth preview saved: {preview_path}")
+
+        # -- Step 6: build textured mesh --
         self._report(progress_cb, 55, "Building mesh...")
         vertices, faces, vertex_colors = _depth_to_mesh(
-            image, depth_norm, focal, depth_scale, max_faces
+            image, depth_norm, focal, depth_scale, max_faces, disc_thr
         )
 
         self._check_cancelled(cancel_event)
 
-        # -- Step 5: export GLB --
+        # -- Step 7: export GLB --
         self._report(progress_cb, 90, "Exporting GLB...")
         mesh = trimesh.Trimesh(
             vertices=vertices,
@@ -131,9 +154,7 @@ class DepthAnythingGenerator(BaseGenerator):
             vertex_colors=vertex_colors,
             process=False,
         )
-        self.outputs_dir.mkdir(parents=True, exist_ok=True)
-        name     = f"{int(time.time())}_{uuid.uuid4().hex[:8]}.glb"
-        out_path = self.outputs_dir / name
+        out_path = self.outputs_dir / f"{stem}.glb"
         mesh.export(str(out_path))
 
         self._report(progress_cb, 100, "Done")
@@ -174,7 +195,7 @@ class DepthAnythingGenerator(BaseGenerator):
 
 
 # ------------------------------------------------------------------ #
-# Depth smoothing (pure numpy, no scipy required)
+# Image pre-processing
 # ------------------------------------------------------------------ #
 
 def _autocrop_black_borders(image: "Image.Image", threshold: int = 15) -> "Image.Image":
@@ -183,9 +204,8 @@ def _autocrop_black_borders(image: "Image.Image", threshold: int = 15) -> "Image
     Scans each side inward until a row/column whose mean exceeds threshold is found.
     Returns the original image unchanged if no border is detected.
     """
-    arr = np.array(image)                          # H x W x 3, uint8
-    gray = arr.mean(axis=2)                        # H x W
-
+    arr  = np.array(image)
+    gray = arr.mean(axis=2)
     h, w = gray.shape
     top, bottom, left, right = 0, h, 0, w
 
@@ -217,29 +237,111 @@ def _autocrop_black_borders(image: "Image.Image", threshold: int = 15) -> "Image
 
 def _auto_brightness(image: "Image.Image") -> "Image.Image":
     """
-    Boosts brightness when the image is globally dark (mean pixel value below 80).
-    Uses a linear scale so that the mean is lifted to ~128.
-    Returns the original image unchanged if already bright enough.
+    Boosts brightness for dark images (mean pixel value below 80).
+    Uses CLAHE in LAB space for smart local contrast enhancement that
+    preserves colour balance. Falls back to linear PIL boost if cv2 is
+    unavailable.
     """
-    from PIL import ImageEnhance
-    arr  = np.array(image, dtype=np.float32)
-    mean = arr.mean()
+    arr  = np.array(image)
+    mean = float(arr.mean())
     if mean >= 80.0:
         return image
-    factor = 128.0 / max(mean, 1.0)
-    factor = float(np.clip(factor, 1.0, 4.0))
-    return ImageEnhance.Brightness(image).enhance(factor)
+
+    try:
+        import cv2
+        # CLAHE in LAB space: only the L (lightness) channel is equalised,
+        # so hue and saturation are left intact.
+        lab     = cv2.cvtColor(arr, cv2.COLOR_RGB2LAB)
+        l, a, b = cv2.split(lab)
+        clahe   = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        l_eq    = clahe.apply(l)
+        lab_eq  = cv2.merge([l_eq, a, b])
+        rgb     = cv2.cvtColor(lab_eq, cv2.COLOR_LAB2RGB)
+        return Image.fromarray(rgb)
+    except Exception:
+        # Fallback: linear brightness scale toward mean=128
+        from PIL import ImageEnhance
+        factor = float(np.clip(128.0 / max(mean, 1.0), 1.0, 4.0))
+        return ImageEnhance.Brightness(image).enhance(factor)
 
 
-def _smooth_depth(depth: np.ndarray, radius: int = 2) -> np.ndarray:
+# ------------------------------------------------------------------ #
+# Depth map filtering
+# ------------------------------------------------------------------ #
+
+def _filter_depth(
+    depth: np.ndarray,
+    guide_image: "Image.Image",
+    sigma_space: int = 4,
+    use_median: bool = True,
+    use_bilateral: bool = True,
+) -> np.ndarray:
     """
-    Box blur via sliding window average.
-    Falls back silently if numpy version is too old.
+    Two-pass depth filter:
+
+    Pass 1 -- Median filter (kernel 5):
+        Removes outlier depth spikes (floating leaves, sensor noise) without
+        blurring edges. Run before bilateral so the bilateral has clean input.
+
+    Pass 2 -- Joint bilateral filter:
+        Smooths depth only where RGB colours are similar, preserving sharp
+        object boundaries. Uses cv2.ximgproc.jointBilateralFilter (contrib)
+        when available, falls back to cv2.bilateralFilter, then to a numpy
+        box blur if cv2 is not installed at all.
+
+    sigma_space  -- spatial sigma passed directly to the bilateral filter.
+    sigmaColor   -- fixed at 0.1 (depth is in [0,1]), tuned for edge preservation.
     """
+    result = depth.astype(np.float32)
+
+    try:
+        import cv2
+
+        if use_median:
+            # medianBlur requires uint8; round-trip through [0,255]
+            d8     = (result * 255.0).clip(0, 255).astype(np.uint8)
+            d8     = cv2.medianBlur(d8, 5)
+            result = d8.astype(np.float32) / 255.0
+
+        if use_bilateral:
+            guide = np.array(guide_image, dtype=np.uint8)
+            dh, dw = result.shape
+            if guide.shape[:2] != (dh, dw):
+                guide = cv2.resize(guide, (dw, dh), interpolation=cv2.INTER_LINEAR)
+
+            try:
+                # Joint bilateral: RGB guide keeps depth edges aligned to colour edges
+                result = cv2.ximgproc.jointBilateralFilter(
+                    joint=guide,
+                    src=result,
+                    d=-1,
+                    sigmaColor=0.1,
+                    sigmaSpace=float(sigma_space),
+                )
+                print("[DepthAnythingGenerator] Joint bilateral filter applied.")
+            except (AttributeError, cv2.error):
+                # opencv-contrib not available -- standard bilateral filter
+                result = cv2.bilateralFilter(
+                    result,
+                    d=-1,
+                    sigmaColor=0.1,
+                    sigmaSpace=float(sigma_space),
+                )
+                print("[DepthAnythingGenerator] Bilateral filter applied (ximgproc unavailable).")
+
+    except ImportError:
+        # cv2 not installed -- numpy box blur as last resort
+        result = _numpy_box_blur(result, radius=sigma_space)
+
+    return result.astype(np.float32)
+
+
+def _numpy_box_blur(depth: np.ndarray, radius: int) -> np.ndarray:
+    """Box blur fallback used when cv2 is not available."""
     try:
         from numpy.lib.stride_tricks import sliding_window_view
-        pad  = np.pad(depth, radius, mode="edge")
-        size = 2 * radius + 1
+        pad     = np.pad(depth, radius, mode="edge")
+        size    = 2 * radius + 1
         windows = sliding_window_view(pad, (size, size))
         return windows.mean(axis=(-1, -2)).astype(np.float32)
     except Exception:
@@ -256,6 +358,7 @@ def _depth_to_mesh(
     focal: float,
     depth_scale: float,
     max_faces: int,
+    discontinuity_threshold: float,
 ):
     """
     Converts a normalised depth map into a textured 3D mesh.
@@ -320,13 +423,7 @@ def _depth_to_mesh(
     z_flat = zz.ravel()
     z00, z01, z10, z11 = z_flat[i00], z_flat[i01], z_flat[i10], z_flat[i11]
 
-    # Adaptive threshold: 90th percentile of depth gradients, clamped to [0.04, 0.20]
-    grad_h = np.abs(np.diff(depth_norm, axis=1))
-    grad_v = np.abs(np.diff(depth_norm, axis=0))
-    thr    = float(np.percentile(
-        np.concatenate([grad_h.ravel(), grad_v.ravel()]), 90
-    )) * 2.0
-    thr = float(np.clip(thr, 0.04, 0.20))
+    thr = float(discontinuity_threshold)
 
     ok1 = (
         (np.abs(z00 - z01) < thr) &

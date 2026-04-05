@@ -108,6 +108,19 @@ def setup(python_exe: str, ext_dir: Path, gpu_sm: int, cuda_version: int = 0) ->
     print("[Depth Anything V2 setup] Installing trimesh ...")
     pip(venv, "install", "trimesh")
 
+    # opencv-contrib-python provides cv2.ximgproc.jointBilateralFilter.
+    # Falls back to opencv-python (no ximgproc) if contrib is unavailable,
+    # which still gives cv2.bilateralFilter and cv2.createCLAHE.
+    print("[Depth Anything V2 setup] Installing opencv-contrib-python ...")
+    ok = pip_try(venv, "install", "opencv-contrib-python")
+    if not ok:
+        print("[Depth Anything V2 setup]   contrib wheel failed, trying opencv-python ...")
+        ok = pip_try(venv, "install", "opencv-python")
+        if ok:
+            print("[Depth Anything V2 setup]   opencv-python installed (joint bilateral unavailable, bilateral filter will be used).")
+        else:
+            print("[Depth Anything V2 setup]   WARNING: opencv not installed. Depth filtering will use numpy box blur fallback.")
+
 
 
 if __name__ == "__main__":

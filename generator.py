@@ -5,9 +5,9 @@ Reference : https://huggingface.co/depth-anything/Depth-Anything-V2-Large-hf
 GitHub    : https://github.com/DepthAnything/Depth-Anything-V2
 
 Three nodes:
-    image_to_depth      — RGB image  → normalised depth map (PNG)
-    depth_to_pointcloud — depth map  → point cloud (PLY)
-    pointcloud_to_mesh  — point cloud → triangulated mesh (GLB)
+    image_to_depth      -- RGB image  -> normalised depth map (PNG)
+    depth_to_pointcloud -- depth map  -> point cloud (PLY)
+    pointcloud_to_mesh  -- point cloud -> triangulated mesh (GLB)
 
 Dependencies are installed by setup.py into venv/ at install time.
 """
@@ -63,7 +63,7 @@ class DepthAnythingGenerator(BaseGenerator):
         super().unload()
 
     # ------------------------------------------------------------------ #
-    # Inference — entry point
+    # Inference -- entry point
     # ------------------------------------------------------------------ #
 
     def generate(
@@ -90,7 +90,7 @@ class DepthAnythingGenerator(BaseGenerator):
         raise ValueError(f"[DepthAnythingGenerator] Unknown node: {node_id}")
 
     # ------------------------------------------------------------------ #
-    # Node 1 — Image → Depth Map
+    # Node 1 -- Image -> Depth Map
     # ------------------------------------------------------------------ #
 
     def _node_image_to_depth(self, image_bytes, params, progress_cb, cancel_event):
@@ -101,17 +101,17 @@ class DepthAnythingGenerator(BaseGenerator):
         self._ensure_model(model_type, use_cuda)
         self._check_cancelled(cancel_event)
 
-        self._report(progress_cb, 10, "Loading image…")
+        self._report(progress_cb, 10, "Loading image...")
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
-        self._report(progress_cb, 30, "Running depth estimation…")
+        self._report(progress_cb, 30, "Running depth estimation...")
         inputs = self._processor(images=image, return_tensors="pt").to(self._device)
         with torch.no_grad():
             outputs = self._model(**inputs)
 
         self._check_cancelled(cancel_event)
 
-        self._report(progress_cb, 75, "Saving depth map…")
+        self._report(progress_cb, 75, "Saving depth map...")
         depth = outputs.predicted_depth
         depth = torch.nn.functional.interpolate(
             depth.unsqueeze(1),
@@ -135,24 +135,24 @@ class DepthAnythingGenerator(BaseGenerator):
         return out_path
 
     # ------------------------------------------------------------------ #
-    # Node 2 — Depth Map → Point Cloud
+    # Node 2 -- Depth Map -> Point Cloud
     # ------------------------------------------------------------------ #
 
     def _node_depth_to_pointcloud(self, image_bytes, params, progress_cb, cancel_event):
         import open3d as o3d
 
-        self._report(progress_cb, 10, "Loading depth map…")
+        self._report(progress_cb, 10, "Loading depth map...")
         depth_img = Image.open(io.BytesIO(image_bytes)).convert("L")
         depth = np.array(depth_img, dtype=np.float32)
         h, w  = depth.shape
 
         self._check_cancelled(cancel_event)
-        self._report(progress_cb, 30, "Back-projecting to 3D…")
+        self._report(progress_cb, 30, "Back-projecting to 3D...")
 
         focal = float(params.get("focal_length", 500.0))
         cx, cy = w / 2.0, h / 2.0
 
-        # Vectorised back-projection — avoids per-pixel Python loop
+        # Vectorised back-projection -- avoids per-pixel Python loop
         y_grid, x_grid = np.mgrid[0:h, 0:w]
         z = depth / 255.0
         X = (x_grid - cx) * z / focal
@@ -163,7 +163,7 @@ class DepthAnythingGenerator(BaseGenerator):
         points = np.column_stack([X.ravel(), Y.ravel(), z.ravel()])[mask]
 
         self._check_cancelled(cancel_event)
-        self._report(progress_cb, 70, "Building point cloud…")
+        self._report(progress_cb, 70, "Building point cloud...")
 
         pc        = o3d.geometry.PointCloud()
         pc.points = o3d.utility.Vector3dVector(points)
@@ -177,13 +177,13 @@ class DepthAnythingGenerator(BaseGenerator):
         return out_path
 
     # ------------------------------------------------------------------ #
-    # Node 3 — Point Cloud → Mesh
+    # Node 3 -- Point Cloud -> Mesh
     # ------------------------------------------------------------------ #
 
     def _node_pointcloud_to_mesh(self, mesh_bytes, params, progress_cb, cancel_event):
         import open3d as o3d
 
-        self._report(progress_cb, 5, "Loading point cloud…")
+        self._report(progress_cb, 5, "Loading point cloud...")
         with tempfile.NamedTemporaryFile(suffix=".ply", delete=False) as tmp:
             tmp.write(mesh_bytes)
             tmp_path = Path(tmp.name)
@@ -194,11 +194,11 @@ class DepthAnythingGenerator(BaseGenerator):
             tmp_path.unlink(missing_ok=True)
 
         self._check_cancelled(cancel_event)
-        self._report(progress_cb, 25, "Estimating normals…")
+        self._report(progress_cb, 25, "Estimating normals...")
         pc.estimate_normals()
 
         self._check_cancelled(cancel_event)
-        self._report(progress_cb, 45, "Reconstructing mesh (Poisson)…")
+        self._report(progress_cb, 45, "Reconstructing mesh (Poisson)...")
         poisson_depth = int(params.get("poisson_depth", 8))
         mesh, _       = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
             pc, depth=poisson_depth
@@ -206,11 +206,11 @@ class DepthAnythingGenerator(BaseGenerator):
 
         max_faces = int(params.get("max_faces", 50000))
         if max_faces > 0 and len(mesh.triangles) > max_faces:
-            self._report(progress_cb, 80, "Simplifying mesh…")
+            self._report(progress_cb, 80, "Simplifying mesh...")
             mesh = mesh.simplify_quadric_decimation(max_faces)
 
         self._check_cancelled(cancel_event)
-        self._report(progress_cb, 92, "Exporting GLB…")
+        self._report(progress_cb, 92, "Exporting GLB...")
         self.outputs_dir.mkdir(parents=True, exist_ok=True)
         name     = f"{int(time.time())}_{uuid.uuid4().hex[:8]}.glb"
         out_path = self.outputs_dir / name
@@ -247,7 +247,7 @@ class DepthAnythingGenerator(BaseGenerator):
         else:
             model_path = hf_repo
 
-        print(f"[DepthAnythingGenerator] Loading {model_type} from {model_path}…")
+        print(f"[DepthAnythingGenerator] Loading {model_type} from {model_path}...")
         self._processor = AutoImageProcessor.from_pretrained(model_path)
         self._model     = AutoModelForDepthEstimation.from_pretrained(model_path).to(device)
         self._model.eval()

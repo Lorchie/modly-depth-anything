@@ -4,11 +4,10 @@ Depth Anything V2 extension for Modly.
 Reference : https://huggingface.co/depth-anything/Depth-Anything-V2-Large-hf
 GitHub    : https://github.com/DepthAnything/Depth-Anything-V2
 
-Single node: image -> mesh
-Full pipeline:
+Pipeline:
   1. Depth estimation (transformers)
-  2. Back-projection -> 3D point grid (numpy)
-  3. Grid triangulation with depth-discontinuity filtering (numpy + trimesh)
+  2. Depth smoothing (numpy box blur)
+  3. Back-projection -> textured 3D mesh (numpy + trimesh)
   4. GLB export (trimesh)
 """
 
@@ -49,7 +48,6 @@ class DepthAnythingGenerator(BaseGenerator):
         return (self.model_dir / "config.json").exists()
 
     def load(self) -> None:
-        # Deferred to _ensure_model() because variant is a runtime param.
         pass
 
     def unload(self) -> None:
@@ -71,10 +69,12 @@ class DepthAnythingGenerator(BaseGenerator):
         import torch
         import trimesh
 
-        model_type = params.get("model_type", "vitl")
-        use_cuda   = params.get("use_cuda", "auto")
-        focal      = float(params.get("focal_length", 500.0))
-        max_faces  = int(params.get("max_faces", 50000))
+        model_type  = params.get("model_type", "vitl")
+        use_cuda    = params.get("use_cuda", "auto")
+        focal       = float(params.get("focal_length", 500.0))
+        depth_scale = float(params.get("depth_scale", 1.5))
+        max_faces   = int(params.get("max_faces", 100000))
+        smooth      = str(params.get("smooth_depth", "true")).lower() == "true"
 
         # -- Step 1: load depth model --
         self._ensure_model(model_type, use_cuda)
@@ -102,15 +102,27 @@ class DepthAnythingGenerator(BaseGenerator):
 
         self._check_cancelled(cancel_event)
 
-        # -- Step 3: grid triangulation --
-        self._report(progress_cb, 55, "Building mesh from depth map...")
-        vertices, faces = _depth_to_grid_mesh(depth_norm, focal, max_faces)
+        # -- Step 3: depth smoothing (reduces noise, smoother mesh) --
+        if smooth:
+            self._report(progress_cb, 40, "Smoothing depth map...")
+            depth_norm = _smooth_depth(depth_norm, radius=2)
+
+        # -- Step 4: build mesh with vertex colours --
+        self._report(progress_cb, 55, "Building mesh...")
+        vertices, faces, vertex_colors = _depth_to_mesh(
+            image, depth_norm, focal, depth_scale, max_faces
+        )
 
         self._check_cancelled(cancel_event)
 
-        # -- Step 4: export GLB --
+        # -- Step 5: export GLB --
         self._report(progress_cb, 90, "Exporting GLB...")
-        mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+        mesh = trimesh.Trimesh(
+            vertices=vertices,
+            faces=faces,
+            vertex_colors=vertex_colors,
+            process=False,
+        )
         self.outputs_dir.mkdir(parents=True, exist_ok=True)
         name     = f"{int(time.time())}_{uuid.uuid4().hex[:8]}.glb"
         out_path = self.outputs_dir / name
@@ -124,7 +136,6 @@ class DepthAnythingGenerator(BaseGenerator):
     # ------------------------------------------------------------------ #
 
     def _ensure_model(self, model_type: str, use_cuda: str = "auto") -> None:
-        """Load (or reload) the Depth Anything model for the requested variant."""
         if self._model is not None and self._current_variant == model_type:
             return
 
@@ -155,23 +166,52 @@ class DepthAnythingGenerator(BaseGenerator):
 
 
 # ------------------------------------------------------------------ #
-# Grid mesh from depth map (pure numpy, no open3d needed)
+# Depth smoothing (pure numpy, no scipy required)
 # ------------------------------------------------------------------ #
 
-def _depth_to_grid_mesh(depth_norm: np.ndarray, focal: float, max_faces: int):
+def _smooth_depth(depth: np.ndarray, radius: int = 2) -> np.ndarray:
     """
-    Back-projects a normalised depth map into a 3D grid mesh.
+    Box blur via sliding window average.
+    Falls back silently if numpy version is too old.
+    """
+    try:
+        from numpy.lib.stride_tricks import sliding_window_view
+        pad  = np.pad(depth, radius, mode="edge")
+        size = 2 * radius + 1
+        windows = sliding_window_view(pad, (size, size))
+        return windows.mean(axis=(-1, -2)).astype(np.float32)
+    except Exception:
+        return depth.astype(np.float32)
 
-    Uses a strided grid so the face count stays at or below max_faces.
-    Filters out triangles that straddle depth discontinuities or background.
 
-    Returns (vertices, faces) as numpy arrays.
+# ------------------------------------------------------------------ #
+# Mesh from depth map
+# ------------------------------------------------------------------ #
+
+def _depth_to_mesh(
+    image: "Image.Image",
+    depth_norm: np.ndarray,
+    focal: float,
+    depth_scale: float,
+    max_faces: int,
+):
+    """
+    Converts a normalised depth map into a textured 3D mesh.
+
+    Coordinate system (Y-up, right-handed, viewer faces -Z):
+      X  = image horizontal (left -> right)
+      Y  = image vertical   (bottom -> top, row 0 = top)
+      Z  = depth relief     (background = 0, foreground = depth_scale)
+
+    Depth Anything V2 convention: higher predicted_depth = farther.
+    We invert so near objects protrude toward the viewer (+Z).
+
+    Returns (vertices, faces, vertex_colors_rgba).
     """
     h, w   = depth_norm.shape
     cx, cy = w / 2.0, h / 2.0
 
-    # Choose stride so the resulting grid has at most max_faces triangles.
-    # A grid of H x W samples produces 2*(H-1)*(W-1) triangles.
+    # Stride so face count stays at or below max_faces
     if max_faces > 0:
         stride = max(1, int(np.sqrt(h * w / (max_faces / 2.0 + 1))))
     else:
@@ -183,15 +223,26 @@ def _depth_to_grid_mesh(depth_norm: np.ndarray, focal: float, max_faces: int):
     W  = len(xs)
 
     yy, xx = np.meshgrid(ys, xs, indexing="ij")   # H x W
-    zz     = depth_norm[yy, xx]                    # H x W
+    zz     = depth_norm[yy, xx]                    # H x W, [0, 1]
 
-    X = (xx - cx) * zz / focal
-    Y = -(yy - cy) * zz / focal
-    Z = zz
+    # Invert: near objects (low depth) -> high Z (pop toward viewer)
+    z_relief = (1.0 - zz) * depth_scale
+
+    # Orthographic projection in the image plane.
+    # Dividing by focal gives image-coordinate units independent of resolution.
+    X = (xx - cx) / focal
+    Y = -(yy - cy) / focal    # flip Y: row 0 (top) -> positive Y
+    Z = z_relief
 
     vertices = np.column_stack([X.ravel(), Y.ravel(), Z.ravel()])
 
-    # Build two triangles per quad, fully vectorised
+    # Sample vertex colours from the original image
+    img_arr = np.array(image)                       # h x w x 3, uint8
+    colors  = img_arr[yy, xx]                       # H x W x 3
+    rgba    = np.ones((H * W, 4), dtype=np.uint8) * 255
+    rgba[:, :3] = colors.reshape(-1, 3)
+
+    # Build two triangles per quad (fully vectorised)
     row_idx = np.arange(H - 1)
     col_idx = np.arange(W - 1)
     rows, cols = np.meshgrid(row_idx, col_idx, indexing="ij")
@@ -203,18 +254,27 @@ def _depth_to_grid_mesh(depth_norm: np.ndarray, focal: float, max_faces: int):
     i10 = (rows + 1) * W + cols
     i11 = (rows + 1) * W + cols + 1
 
-    z_flat = Z.ravel()
+    # Use original (pre-inversion) depth for discontinuity detection
+    z_flat = zz.ravel()
     z00, z01, z10, z11 = z_flat[i00], z_flat[i01], z_flat[i10], z_flat[i11]
 
-    # Reject triangles with large depth jumps (depth edges / occlusions)
-    thr = 0.05
+    # Adaptive threshold: 90th percentile of depth gradients, clamped to [0.04, 0.20]
+    grad_h = np.abs(np.diff(depth_norm, axis=1))
+    grad_v = np.abs(np.diff(depth_norm, axis=0))
+    thr    = float(np.percentile(
+        np.concatenate([grad_h.ravel(), grad_v.ravel()]), 90
+    )) * 2.0
+    thr = float(np.clip(thr, 0.04, 0.20))
+
     ok1 = (
-        (np.abs(z00 - z01) < thr) & (np.abs(z00 - z10) < thr) & (np.abs(z01 - z10) < thr)
-        & (z00 > 0.01) & (z01 > 0.01) & (z10 > 0.01)
+        (np.abs(z00 - z01) < thr) &
+        (np.abs(z00 - z10) < thr) &
+        (np.abs(z01 - z10) < thr)
     )
     ok2 = (
-        (np.abs(z01 - z11) < thr) & (np.abs(z01 - z10) < thr) & (np.abs(z11 - z10) < thr)
-        & (z01 > 0.01) & (z11 > 0.01) & (z10 > 0.01)
+        (np.abs(z01 - z11) < thr) &
+        (np.abs(z01 - z10) < thr) &
+        (np.abs(z11 - z10) < thr)
     )
 
     faces = np.concatenate([
@@ -222,4 +282,4 @@ def _depth_to_grid_mesh(depth_norm: np.ndarray, focal: float, max_faces: int):
         np.column_stack([i01, i11, i10])[ok2],
     ])
 
-    return vertices, faces
+    return vertices, faces, rgba

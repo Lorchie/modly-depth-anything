@@ -139,7 +139,14 @@ class DepthAnythingGenerator(BaseGenerator):
     # ------------------------------------------------------------------ #
 
     def _node_depth_to_pointcloud(self, image_bytes, params, progress_cb, cancel_event):
-        import open3d as o3d
+        try:
+            import open3d as o3d
+        except ImportError:
+            raise RuntimeError(
+                "open3d is not installed. "
+                "Click Repair on the Models page to re-run setup, "
+                "or install it manually: pip install open3d"
+            )
 
         self._report(progress_cb, 10, "Loading depth map...")
         depth_img = Image.open(io.BytesIO(image_bytes)).convert("L")
@@ -181,7 +188,14 @@ class DepthAnythingGenerator(BaseGenerator):
     # ------------------------------------------------------------------ #
 
     def _node_pointcloud_to_mesh(self, mesh_bytes, params, progress_cb, cancel_event):
-        import open3d as o3d
+        try:
+            import open3d as o3d
+        except ImportError:
+            raise RuntimeError(
+                "open3d is not installed. "
+                "Click Repair on the Models page to re-run setup, "
+                "or install it manually: pip install open3d"
+            )
 
         self._report(progress_cb, 5, "Loading point cloud...")
         with tempfile.NamedTemporaryFile(suffix=".ply", delete=False) as tmp:

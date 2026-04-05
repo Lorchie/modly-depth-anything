@@ -115,59 +115,6 @@ def setup(python_exe: str, ext_dir: Path, gpu_sm: int, cuda_version: int = 0) ->
     else:
         print(f"[Depth Anything V2 setup] {open3d_pkg} installed successfully.")
 
-    # Create marker directories for nodes that need no model weights.
-    # Modly checks model_dir/config.json to decide if a node is "downloaded".
-    # We write a minimal config.json so these nodes are immediately usable
-    # without requiring manual action from the user on the Models page.
-    _create_no_download_markers(ext_dir, manifest_id="modly-depth-anything")
-
-    print("[Depth Anything V2 setup] Done. Venv ready at:", venv)
-
-
-def _create_no_download_markers(ext_dir: Path, manifest_id: str) -> None:
-    """
-    Creates config.json marker files in the model_dir for nodes that have
-    no real model weights (depth_to_pointcloud, pointcloud_to_mesh).
-
-    Modly sets model_dir = MODELS_DIR / "<ext_id>/<node_id>".
-    We try to locate MODELS_DIR by:
-      1. MODELS_DIR environment variable (set by Modly in some contexts)
-      2. Sibling folder of extensions/ (common Modly layout)
-      3. Default ~/.modly/models
-    """
-    import json as _json
-    import os as _os
-
-    # Resolve MODELS_DIR
-    models_dir = None
-
-    env_models = _os.environ.get("MODELS_DIR", "")
-    if env_models:
-        models_dir = Path(env_models)
-    else:
-        # ext_dir = .../Modly/extensions/modly-depth-anything
-        # Try .../Modly/models first, then ~/.modly/models
-        candidate = ext_dir.parent.parent / "models"
-        if candidate.parent.exists():
-            models_dir = candidate
-        else:
-            models_dir = Path.home() / ".modly" / "models"
-
-    no_download_nodes = ["depth_to_pointcloud", "pointcloud_to_mesh"]
-    marker = {"_marker": "no weights needed -- created by setup.py"}
-
-    for node_id in no_download_nodes:
-        node_dir = models_dir / manifest_id / node_id
-        try:
-            node_dir.mkdir(parents=True, exist_ok=True)
-            config_path = node_dir / "config.json"
-            if not config_path.exists():
-                config_path.write_text(_json.dumps(marker), encoding="utf-8")
-                print(f"[Depth Anything V2 setup] Marker created: {config_path}")
-            else:
-                print(f"[Depth Anything V2 setup] Marker already exists: {config_path}")
-        except Exception as exc:
-            print(f"[Depth Anything V2 setup] WARNING: could not create marker for {node_id}: {exc}")
 
 
 if __name__ == "__main__":

@@ -3,15 +3,15 @@
   "name": "Depth Anything V2",
   "version": "2.0.0",
   "author": "Guillaume",
-  "description": "Depth estimation, point cloud generation, and mesh reconstruction using Depth Anything V2. Three chained nodes: image -> depth map -> point cloud -> mesh. GPU acceleration when available.",
+  "description": "Full depth-based 3D reconstruction pipeline using Depth Anything V2. Converts an image to a mesh via depth estimation, point cloud back-projection, and Poisson surface reconstruction.",
   "generator_class": "DepthAnythingGenerator",
   "tags": ["depth-estimation", "point-cloud", "reconstruction", "image-to-mesh"],
   "nodes": [
     {
-      "id": "image_to_depth",
-      "name": "Image -> Depth Map",
+      "id": "generate",
+      "name": "Image -> Mesh (Depth Reconstruction)",
       "input": "image",
-      "output": "image",
+      "output": "mesh",
       "hf_repo": "depth-anything/Depth-Anything-V2-Large-hf",
       "download_check": "config.json",
       "params_schema": [
@@ -38,18 +38,7 @@
             { "value": "false", "label": "Force CPU" }
           ],
           "tooltip": "Select compute device. Auto-detect uses GPU when available."
-        }
-      ]
-    },
-    {
-      "id": "depth_to_pointcloud",
-      "name": "Depth Map -> Point Cloud",
-      "input": "image",
-      "output": "mesh",
-      "hf_repo": "depth-anything/Depth-Anything-V2-Large-hf",
-      "download_check": "config.json",
-      "hf_skip_prefixes": ["model.safetensors"],
-      "params_schema": [
+        },
         {
           "id": "focal_length",
           "label": "Focal Length (px)",
@@ -58,19 +47,8 @@
           "min": 100.0,
           "max": 2000.0,
           "step": 10.0,
-          "tooltip": "Estimated focal length in pixels used for back-projection. Higher values compress depth range."
-        }
-      ]
-    },
-    {
-      "id": "pointcloud_to_mesh",
-      "name": "Point Cloud -> Mesh",
-      "input": "mesh",
-      "output": "mesh",
-      "hf_repo": "depth-anything/Depth-Anything-V2-Large-hf",
-      "download_check": "config.json",
-      "hf_skip_prefixes": ["model.safetensors"],
-      "params_schema": [
+          "tooltip": "Estimated focal length for point cloud back-projection. Higher values compress depth range."
+        },
         {
           "id": "poisson_depth",
           "label": "Poisson Depth",
@@ -78,7 +56,7 @@
           "default": 8,
           "min": 5,
           "max": 12,
-          "tooltip": "Octree depth for Poisson surface reconstruction. Higher = more detail but slower and more memory."
+          "tooltip": "Octree depth for Poisson surface reconstruction. Higher = more detail but slower."
         },
         {
           "id": "max_faces",
@@ -87,7 +65,7 @@
           "default": 50000,
           "min": -1,
           "max": 500000,
-          "tooltip": "Target face count after mesh simplification. Set to -1 to disable simplification."
+          "tooltip": "Target face count after simplification. Set to -1 to disable."
         }
       ]
     }

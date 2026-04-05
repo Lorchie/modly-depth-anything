@@ -5,9 +5,11 @@ Reference : https://huggingface.co/depth-anything/Depth-Anything-V2-Large-hf
 GitHub    : https://github.com/DepthAnything/Depth-Anything-V2
 
 Single node: image -> mesh
-Full pipeline: depth estimation -> point cloud back-projection -> Poisson mesh.
-
-Dependencies are installed by setup.py into venv/ at install time.
+Full pipeline:
+  1. Depth estimation (transformers)
+  2. Back-projection -> 3D point grid (numpy)
+  3. Grid triangulation with depth-discontinuity filtering (numpy + trimesh)
+  4. GLB export (trimesh)
 """
 
 import io
@@ -67,12 +69,12 @@ class DepthAnythingGenerator(BaseGenerator):
         cancel_event: Optional[threading.Event] = None,
     ) -> Path:
         import torch
+        import trimesh
 
-        model_type    = params.get("model_type", "vitl")
-        use_cuda      = params.get("use_cuda", "auto")
-        focal         = float(params.get("focal_length", 500.0))
-        poisson_depth = int(params.get("poisson_depth", 8))
-        max_faces     = int(params.get("max_faces", 50000))
+        model_type = params.get("model_type", "vitl")
+        use_cuda   = params.get("use_cuda", "auto")
+        focal      = float(params.get("focal_length", 500.0))
+        max_faces  = int(params.get("max_faces", 50000))
 
         # -- Step 1: load depth model --
         self._ensure_model(model_type, use_cuda)
@@ -100,52 +102,19 @@ class DepthAnythingGenerator(BaseGenerator):
 
         self._check_cancelled(cancel_event)
 
-        # -- Step 3: back-projection to point cloud --
-        self._report(progress_cb, 50, "Building point cloud...")
-
-        try:
-            import open3d as o3d
-        except ImportError:
-            raise RuntimeError(
-                "open3d is not installed. "
-                "Click Repair on the Models page to re-run setup."
-            )
-
-        h, w   = depth_norm.shape
-        cx, cy = w / 2.0, h / 2.0
-
-        y_grid, x_grid = np.mgrid[0:h, 0:w]
-        z = depth_norm
-        X = (x_grid - cx) * z / focal
-        Y = -(y_grid - cy) * z / focal
-
-        mask   = z.ravel() > 0.01
-        points = np.column_stack([X.ravel(), Y.ravel(), z.ravel()])[mask]
-
-        pc        = o3d.geometry.PointCloud()
-        pc.points = o3d.utility.Vector3dVector(points)
+        # -- Step 3: grid triangulation --
+        self._report(progress_cb, 55, "Building mesh from depth map...")
+        vertices, faces = _depth_to_grid_mesh(depth_norm, focal, max_faces)
 
         self._check_cancelled(cancel_event)
 
-        # -- Step 4: Poisson surface reconstruction --
-        self._report(progress_cb, 65, "Reconstructing mesh (Poisson)...")
-        pc.estimate_normals()
-        mesh, _ = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
-            pc, depth=poisson_depth
-        )
-
-        if max_faces > 0 and len(mesh.triangles) > max_faces:
-            self._report(progress_cb, 85, "Simplifying mesh...")
-            mesh = mesh.simplify_quadric_decimation(max_faces)
-
-        self._check_cancelled(cancel_event)
-
-        # -- Step 5: export GLB --
-        self._report(progress_cb, 95, "Exporting GLB...")
+        # -- Step 4: export GLB --
+        self._report(progress_cb, 90, "Exporting GLB...")
+        mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
         self.outputs_dir.mkdir(parents=True, exist_ok=True)
         name     = f"{int(time.time())}_{uuid.uuid4().hex[:8]}.glb"
         out_path = self.outputs_dir / name
-        o3d.io.write_triangle_mesh(str(out_path), mesh)
+        mesh.export(str(out_path))
 
         self._report(progress_cb, 100, "Done")
         return out_path
@@ -171,7 +140,6 @@ class DepthAnythingGenerator(BaseGenerator):
         else:
             device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        # For vitl (default): load from Modly's managed model_dir when available.
         if model_type == "vitl" and self.is_downloaded():
             model_path = str(self.model_dir)
         else:
@@ -184,3 +152,74 @@ class DepthAnythingGenerator(BaseGenerator):
         self._device          = device
         self._current_variant = model_type
         print(f"[DepthAnythingGenerator] {model_type} loaded on {device}.")
+
+
+# ------------------------------------------------------------------ #
+# Grid mesh from depth map (pure numpy, no open3d needed)
+# ------------------------------------------------------------------ #
+
+def _depth_to_grid_mesh(depth_norm: np.ndarray, focal: float, max_faces: int):
+    """
+    Back-projects a normalised depth map into a 3D grid mesh.
+
+    Uses a strided grid so the face count stays at or below max_faces.
+    Filters out triangles that straddle depth discontinuities or background.
+
+    Returns (vertices, faces) as numpy arrays.
+    """
+    h, w   = depth_norm.shape
+    cx, cy = w / 2.0, h / 2.0
+
+    # Choose stride so the resulting grid has at most max_faces triangles.
+    # A grid of H x W samples produces 2*(H-1)*(W-1) triangles.
+    if max_faces > 0:
+        stride = max(1, int(np.sqrt(h * w / (max_faces / 2.0 + 1))))
+    else:
+        stride = 1
+
+    ys = np.arange(0, h, stride)
+    xs = np.arange(0, w, stride)
+    H  = len(ys)
+    W  = len(xs)
+
+    yy, xx = np.meshgrid(ys, xs, indexing="ij")   # H x W
+    zz     = depth_norm[yy, xx]                    # H x W
+
+    X = (xx - cx) * zz / focal
+    Y = -(yy - cy) * zz / focal
+    Z = zz
+
+    vertices = np.column_stack([X.ravel(), Y.ravel(), Z.ravel()])
+
+    # Build two triangles per quad, fully vectorised
+    row_idx = np.arange(H - 1)
+    col_idx = np.arange(W - 1)
+    rows, cols = np.meshgrid(row_idx, col_idx, indexing="ij")
+    rows = rows.ravel()
+    cols = cols.ravel()
+
+    i00 = rows * W + cols
+    i01 = rows * W + cols + 1
+    i10 = (rows + 1) * W + cols
+    i11 = (rows + 1) * W + cols + 1
+
+    z_flat = Z.ravel()
+    z00, z01, z10, z11 = z_flat[i00], z_flat[i01], z_flat[i10], z_flat[i11]
+
+    # Reject triangles with large depth jumps (depth edges / occlusions)
+    thr = 0.05
+    ok1 = (
+        (np.abs(z00 - z01) < thr) & (np.abs(z00 - z10) < thr) & (np.abs(z01 - z10) < thr)
+        & (z00 > 0.01) & (z01 > 0.01) & (z10 > 0.01)
+    )
+    ok2 = (
+        (np.abs(z01 - z11) < thr) & (np.abs(z01 - z10) < thr) & (np.abs(z11 - z10) < thr)
+        & (z01 > 0.01) & (z11 > 0.01) & (z10 > 0.01)
+    )
+
+    faces = np.concatenate([
+        np.column_stack([i00, i01, i10])[ok1],
+        np.column_stack([i01, i11, i10])[ok2],
+    ])
+
+    return vertices, faces

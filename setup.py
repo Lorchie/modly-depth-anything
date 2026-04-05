@@ -105,15 +105,8 @@ def setup(python_exe: str, ext_dir: Path, gpu_sm: int, cuda_version: int = 0) ->
         "huggingface_hub",
     )
 
-    # open3d -- last version supporting Python 3.8 is 0.17.0
-    open3d_pkg = "open3d==0.17.0" if py_ver <= (3, 8) else "open3d"
-    print(f"[Depth Anything V2 setup] Installing {open3d_pkg} ...")
-    ok = pip_try(venv, "install", open3d_pkg)
-    if not ok:
-        print("[Depth Anything V2 setup] WARNING: open3d failed to install.")
-        print("[Depth Anything V2 setup]   Nodes 'Depth Map -> Point Cloud' and 'Point Cloud -> Mesh' will be unavailable.")
-    else:
-        print(f"[Depth Anything V2 setup] {open3d_pkg} installed successfully.")
+    print("[Depth Anything V2 setup] Installing trimesh ...")
+    pip(venv, "install", "trimesh")
 
 
 

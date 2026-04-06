@@ -4,11 +4,6 @@ Converts any image into a textured 3D mesh (`.glb`) using
 [Depth Anything V2](https://github.com/DepthAnything/Depth-Anything-V2) depth estimation
 and orthographic back-projection.
 
-**Extension ID:** `modly-depth-anything`  
-**Version:** 2.2.0  
-**Author:** Guillaume  
-**VRAM:** ~4 GB (ViT-L)
-
 ---
 
 ## Pipeline

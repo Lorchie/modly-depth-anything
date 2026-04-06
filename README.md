@@ -6,6 +6,20 @@ and orthographic back-projection.
 
 ---
 
+What is it for?
+This extension estimates the depth of each pixel in a photo and converts it into a navigable 3D mesh. It works entirely on your GPU, no internet connection required after the model is downloaded.
+Use cases:
+
+Parallax / 2.5D animation — give depth and motion to a flat image, great for cinematic effects or motion graphics
+Background scene preview — quickly turn a reference photo into a 3D scene backdrop for visualization or pre-production
+Scene exploration — load the generated .glb into Blender or any 3D viewer to navigate inside a photo as if it were a 3D space
+Foreground/background separation — the depth map can be used to isolate subjects from their background
+
+Best results with: landscape photos, urban streets, indoor rooms, corridors — any real photo with clear perspective and depth cues.
+Limitations: cartoon/illustrated images, very dark photos, or large plain backgrounds tend to produce less accurate meshes, as the model relies on visual depth cues learned from real-world photos.
+
+---
+
 ## Pipeline
 
 ```
